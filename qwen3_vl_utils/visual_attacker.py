@@ -146,8 +146,20 @@ class Attacker:
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
         repeated_images = [raw_image for _ in range(batch_size)]
 
+        text_prompts = []
+        for msg in batch_messages:
+            num_images = self._count_images(msg)
+            image_placeholders = [None] * num_images if num_images > 0 else None
+            prompt = self.tokenizer.apply_chat_template(
+                msg,
+                tokenize=False,
+                add_generation_prompt=False,
+                images=image_placeholders,
+            )
+            text_prompts.append(prompt)
+
         processor_inputs = self.processor(
-            text=batch_messages,
+            text=text_prompts,
             images=repeated_images,
             return_tensors="pt",
             padding=True,

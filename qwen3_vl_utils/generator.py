@@ -38,11 +38,12 @@ class Generator:
             raise ValueError(f"Unsupported image tensor shape {image_input.shape} for generator.")
 
         messages = self._build_messages(extra_user_prompt)
+        prompt_str = self._build_prompt_string(messages)
         pil_images = self._prepare_visual_batch(image_input)
 
         processor_inputs = self.processor(
             images=pil_images,
-            text=[messages],
+            text=[prompt_str],
             return_tensors="pt",
             padding=True,
         )
@@ -84,3 +85,26 @@ class Generator:
         if out.dim() != 4:
             raise ValueError(f"Unsupported tensor shape for visual batch: {tensor.shape}")
         return self.processor.image_processor.postprocess(out, output_type="pil")
+
+    def _build_prompt_string(self, messages: List[Dict[str, Any]]) -> str:
+        num_images = self._count_images(messages)
+        image_placeholders = [None] * num_images if num_images > 0 else None
+        prompt = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            images=image_placeholders,
+        )
+        return prompt
+
+    @staticmethod
+    def _count_images(messages: List[Dict[str, Any]]) -> int:
+        count = 0
+        for turn in messages:
+            content = turn.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    count += 1
+        return count
