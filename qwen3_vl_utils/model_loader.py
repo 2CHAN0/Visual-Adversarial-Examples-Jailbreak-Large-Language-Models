@@ -1,5 +1,5 @@
 import torch
-from transformers import AutoModel, AutoProcessor, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
 
 
 def load_qwen_model(model_name: str, gpu_id: int = 0):
@@ -26,7 +26,7 @@ def load_qwen_model(model_name: str, gpu_id: int = 0):
         padding_side="right",
     )
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(
+    model = AutoModelForCausalLM.from_pretrained(
         model_name,
         torch_dtype=dtype,
         trust_remote_code=True,
