@@ -2,103 +2,102 @@ import argparse
 import csv
 import os
 
-import torch
 from PIL import Image
+import torch
 from torchvision.utils import save_image
-from transformers import AutoModelForVision2Seq, AutoProcessor
 
-from qwen3_vl_utils import PromptWrapper, Attacker, DEFAULT_SYSTEM_PROMPT, DEFAULT_USER_PROMPT
+from qwen3_vl_utils import prompt_wrapper, visual_attacker
+from qwen3_vl_utils.model_loader import load_qwen_model
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Visual adversarial attack on Qwen3-VL.")
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-2B-Instruct", help="Hugging Face model id.")
-    parser.add_argument("--gpu-id", type=int, default=0, help="GPU to load the model on.")
-    parser.add_argument("--n-iters", type=int, default=5000, help="Number of iterations for the attack.")
-    parser.add_argument("--batch-size", type=int, default=8, help="Number of targets sampled per iteration.")
-    parser.add_argument("--eps", type=int, default=32, help="Epsilon of the attack budget (in 1/255 units).")
-    parser.add_argument("--alpha", type=int, default=1, help="Step size of the attack (in 1/255 units).")
-    parser.add_argument("--constrained", action="store_true", help="Use an L-infinity constrained attack.")
-    parser.add_argument("--save-dir", type=str, default="output", help="Directory to store adversarial images.")
-    parser.add_argument("--template-image", type=str, default="adversarial_images/clean.jpeg", help="Path to seed image.")
-    parser.add_argument("--system-prompt", type=str, default=DEFAULT_SYSTEM_PROMPT, help="System prompt for Qwen3 chat template.")
-    parser.add_argument("--user-prompt", type=str, default=DEFAULT_USER_PROMPT, help="User text that accompanies the attack image.")
-    parser.add_argument("--targets-path", type=str, default="harmful_corpus/derogatory_corpus.csv", help="CSV file containing target strings.")
-    return parser.parse_args()
+
+    parser = argparse.ArgumentParser(description="Visual attack script for Qwen3-VL models.")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-2B-Instruct",
+                        help="Hugging Face identifier of the Qwen3-VL checkpoint.")
+    parser.add_argument("--gpu-id", type=int, default=0, help="GPU id used for model loading.")
+    parser.add_argument("--n-iters", type=int, default=5000, help="Number of optimization steps.")
+    parser.add_argument("--batch-size", type=int, default=8, help="Number of target strings per step.")
+    parser.add_argument("--eps", type=int, default=32, help="L-infinity budget (0~255 scale) for constrained attack.")
+    parser.add_argument("--alpha", type=int, default=1, help="Per-step update size (0~255 scale).")
+    parser.add_argument("--constrained", default=False, action="store_true",
+                        help="Enable constrained attack mode.")
+
+    parser.add_argument("--system-prompt", type=str, default="You are a helpful assistant.",
+                        help="System prompt prepended to every conversation.")
+    parser.add_argument("--user-prompt", type=str, default="",
+                        help="Optional user text that accompanies the adversarial image.")
+    parser.add_argument("--template-image", type=str, default="adversarial_images/clean.jpeg",
+                        help="Starting image for optimization.")
+
+    parser.add_argument("--targets-file", type=str, default="harmful_corpus/derogatory_corpus.csv",
+                        help="CSV file containing target continuations (single column).")
+    parser.add_argument("--save-dir", type=str, default="output",
+                        help="Destination directory for attack logs and the final image.")
+
+    args = parser.parse_args()
+    return args
 
 
-def load_targets(path):
-    with open(path, "r") as f:
-        reader = csv.reader(f)
+def load_image(path):
+    return Image.open(path).convert("RGB")
+
+
+def read_targets(csv_path):
+    with open(csv_path, "r") as fh:
+        reader = csv.reader(fh, delimiter=",")
         targets = [row[0] for row in reader if row]
     if not targets:
-        raise ValueError(f"No targets found in {path}")
+        raise ValueError(f"No targets found in {csv_path}")
     return targets
 
 
 def main():
+
+    print(">>> Initializing Qwen3-VL pipeline")
     args = parse_args()
-    device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16 if torch.cuda.is_available() else torch.float32
+
+    tokenizer, processor, model, device = load_qwen_model(args.model_name, args.gpu_id)
+    base_messages = prompt_wrapper.build_base_messages(args.system_prompt, args.user_prompt)
 
     if not os.path.exists(args.save_dir):
         os.makedirs(args.save_dir, exist_ok=True)
 
-    print(">>> Initializing Qwen3-VL model")
-    processor = AutoProcessor.from_pretrained(args.model_name, trust_remote_code=True)
-    model = AutoModelForVision2Seq.from_pretrained(
-        args.model_name,
-        trust_remote_code=True,
-        torch_dtype=dtype,
-    )
-    model.to(device)
-    model.eval()
-    print("[Initialization Finished]\n")
+    template = load_image(args.template_image)
+    image_tensor = processor.image_processor(template, return_tensors="pt")["pixel_values"].to(device=device,
+                                                                                                 dtype=model.dtype)
 
-    targets = load_targets(args.targets_path)
-
-    prompt_builder = PromptWrapper(
-        processor=processor,
-        device=device,
-        system_prompt=args.system_prompt,
-        user_prompt=args.user_prompt,
-    )
-
-    attacker = Attacker(
+    targets = read_targets(args.targets_file)
+    attacker = visual_attacker.Attacker(
         args=args,
         model=model,
+        tokenizer=tokenizer,
         processor=processor,
-        prompt_builder=prompt_builder,
+        base_messages=base_messages,
         targets=targets,
         device=device,
     )
 
-    template = Image.open(args.template_image).convert("RGB")
-    image_inputs = processor.image_processor(images=[template], return_tensors="pt")
-    template_pixels = image_inputs["pixel_values"].to(device)
-    template_img = attacker.denormalize(template_pixels)
-
-    alpha = args.alpha / 255
-    epsilon = args.eps / 255
-
-    if args.constrained:
-        adv_img_prompt = attacker.attack_constrained(
-            img=template_img,
+    if not args.constrained:
+        print("[Qwen3-VL][unconstrained attack]")
+        adv = attacker.attack_unconstrained(
+            img=image_tensor,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
-            alpha=alpha,
-            epsilon=epsilon,
+            alpha=args.alpha / 255.0,
         )
     else:
-        adv_img_prompt = attacker.attack_unconstrained(
-            img=template_img,
+        print("[Qwen3-VL][constrained attack]")
+        adv = attacker.attack_constrained(
+            img=image_tensor,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
-            alpha=alpha,
+            alpha=args.alpha / 255.0,
+            epsilon=args.eps / 255.0,
         )
 
     save_path = os.path.join(args.save_dir, "bad_prompt.bmp")
-    save_image(adv_img_prompt, save_path)
+    save_image(adv, save_path)
     print(f"[Done] Saved adversarial image to {save_path}")
 
 

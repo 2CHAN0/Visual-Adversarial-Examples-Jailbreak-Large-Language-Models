@@ -1,47 +1,49 @@
+import copy
+from typing import List, Dict, Any
+
 import torch
 
 
 class Generator:
-    """Utility to log sample generations during optimization."""
 
-    def __init__(
-        self,
-        model,
-        processor,
-        prompt_wrapper,
-        device,
-        max_new_tokens=256,
-        top_p=0.9,
-        temperature=1.0,
-    ):
+    def __init__(self, model, tokenizer, base_messages: List[Dict[str, Any]], device: str = "cuda:0",
+                 max_new_tokens: int = 512, temperature: float = 0.2):
         self.model = model
-        self.processor = processor
-        self.prompt_wrapper = prompt_wrapper
+        self.tokenizer = tokenizer
+        self.base_messages = base_messages
         self.device = device
         self.max_new_tokens = max_new_tokens
-        self.top_p = top_p
         self.temperature = temperature
-        self.tokenizer = processor.tokenizer
 
-    def generate(self, pixel_values):
-        inputs = self.prompt_wrapper.build_generation_inputs()
-        inputs["pixel_values"] = pixel_values.to(self.device, dtype=self.model.dtype)
+    def _build_input_ids(self, extra_user_prompt: str = "") -> torch.Tensor:
+        messages = copy.deepcopy(self.base_messages)
+        if extra_user_prompt:
+            messages[-1]["content"].append({"type": "text", "text": extra_user_prompt})
 
-        pad_id = self.tokenizer.pad_token_id
-        eos_id = self.tokenizer.eos_token_id
+        input_ids = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_tensors="pt"
+        ).to(self.device)
+        return input_ids
 
-        with torch.no_grad():
+    def generate(self, image: torch.Tensor, extra_user_prompt: str = "") -> str:
+        input_ids = self._build_input_ids(extra_user_prompt)
+        input_len = input_ids.shape[1]
+
+        with torch.inference_mode():
             output_ids = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
+                input_ids=input_ids,
+                pixel_values=image.half(),
                 do_sample=True,
-                top_p=self.top_p,
                 temperature=self.temperature,
-                pad_token_id=pad_id,
-                eos_token_id=eos_id,
+                max_new_tokens=self.max_new_tokens,
+                use_cache=True,
             )
 
-        context_length = inputs["input_ids"].shape[-1]
-        generated_tokens = output_ids[:, context_length:]
-        text = self.tokenizer.batch_decode(generated_tokens, skip_special_tokens=True)[0].strip()
-        return text
+        outputs = self.tokenizer.batch_decode(
+            output_ids[:, input_len:],
+            skip_special_tokens=True
+        )[0]
+        return outputs.strip()
