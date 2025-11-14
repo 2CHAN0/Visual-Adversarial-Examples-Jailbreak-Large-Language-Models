@@ -265,6 +265,30 @@ We also implement our attacks on two other open-sourced VLMs, including [Instruc
   python cal_metrics.py --input result_eval.jsonl
   ```
 
+### Qwen3-VL (Hugging Face)
+
+* Install the Hugging Face stack (requires recent versions of `transformers`, `accelerate`, and `safetensors`):
+
+  ```bash
+  pip install -U "transformers>=4.39" accelerate safetensors
+  ```
+
+  Login with `huggingface-cli login` if the model requires authentication.
+
+* Launch the visual attack (replace the model id if you have a locally fine-tuned checkpoint):
+
+  ```bash
+  python qwen3_vl_visual_attack.py \
+    --model-name Qwen/Qwen3-VL-2B-Instruct \
+    --gpu-id 0 \
+    --n-iters 5000 \
+    --batch-size 8 \
+    --constrained --eps 16 --alpha 1 \
+    --save-dir results_qwen3_vl
+  ```
+
+  Remove the `--constrained --eps ...` flags to run the unconstrained variant. The generated adversarial image is stored at `<save_dir>/bad_prompt.bmp`, with intermediate checkpoints and the optimization curve saved in the same directory. Use `--user-prompt`/`--system-prompt` to customize the chat template that accompanies the attack image.
+
 <br><br>
 
 ## Citation
