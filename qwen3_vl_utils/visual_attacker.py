@@ -57,7 +57,7 @@ class Attacker:
         self.model.eval()
         self.model.requires_grad_(False)
 
-    def attack_unconstrained(self, img, batch_size=8, num_iter=2000, alpha=1 / 255.0):
+    def attack_unconstrained(self, img, raw_image, batch_size=8, num_iter=2000, alpha=1 / 255.0):
         data_min, data_max = self._compute_bounds(img)
         adv_data = torch.empty_like(img).uniform_(data_min, data_max).to(self.device)
         adv_data.requires_grad_(True)
@@ -65,7 +65,7 @@ class Attacker:
         for t in tqdm(range(num_iter + 1)):
             batch_targets = self._sample_targets(batch_size)
 
-            loss = self.attack_loss(adv_data, batch_targets)
+            loss = self.attack_loss(adv_data, raw_image, batch_targets)
             loss.backward()
 
             adv_data.data = (adv_data.data - alpha * adv_data.grad.detach().sign()).clamp(data_min, data_max)
@@ -77,7 +77,7 @@ class Attacker:
 
         return adv_data.detach()
 
-    def attack_constrained(self, img, batch_size=8, num_iter=2000, alpha=1 / 255.0, epsilon=128 / 255.0):
+    def attack_constrained(self, img, raw_image, batch_size=8, num_iter=2000, alpha=1 / 255.0, epsilon=128 / 255.0):
         base_img = img.detach()
         data_min, data_max = self._compute_bounds(base_img)
 
@@ -88,7 +88,7 @@ class Attacker:
         for t in tqdm(range(num_iter + 1)):
             batch_targets = self._sample_targets(batch_size)
 
-            loss = self.attack_loss(adv_data, batch_targets)
+            loss = self.attack_loss(adv_data, raw_image, batch_targets)
             loss.backward()
 
             adv_data.data = adv_data.data - alpha * adv_data.grad.detach().sign()
@@ -135,7 +135,7 @@ class Attacker:
         plt.clf()
         torch.save(self.loss_buffer, f"{self.args.save_dir}/loss")
 
-    def attack_loss(self, images: torch.Tensor, targets: List[str]) -> torch.Tensor:
+    def attack_loss(self, images: torch.Tensor, raw_image, targets: List[str]) -> torch.Tensor:
         batch_size = len(targets)
         if batch_size == 0:
             raise ValueError("No targets provided for attack_loss.")
@@ -144,11 +144,11 @@ class Attacker:
         images = images.repeat(*repeat_shape)
 
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
-        pil_images = self._prepare_visual_batch(images)
+        repeated_images = [raw_image for _ in range(batch_size)]
 
         processor_inputs = self.processor(
             text=batch_messages,
-            images=pil_images,
+            images=repeated_images,
             return_tensors="pt",
             padding=True,
         )

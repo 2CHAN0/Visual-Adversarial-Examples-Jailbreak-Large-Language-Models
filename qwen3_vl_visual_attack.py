@@ -91,6 +91,7 @@ def main():
         print("[Qwen3-VL][unconstrained attack]")
         adv = attacker.attack_unconstrained(
             img=pixel_values,
+            raw_image=template,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,
@@ -99,6 +100,7 @@ def main():
         print("[Qwen3-VL][constrained attack]")
         adv = attacker.attack_constrained(
             img=pixel_values,
+            raw_image=template,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,
