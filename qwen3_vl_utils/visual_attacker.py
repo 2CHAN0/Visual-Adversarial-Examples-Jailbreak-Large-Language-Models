@@ -151,14 +151,17 @@ class Attacker:
             image_grid_thw = self._infer_grid_thw(images, batch_size)
 
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
-        text_prompts = [
-            self.tokenizer.apply_chat_template(
+        text_prompts = []
+        for msg in batch_messages:
+            num_images = self._count_images(msg)
+            image_placeholders = [None] * num_images if num_images > 0 else None
+            prompt = self.tokenizer.apply_chat_template(
                 msg,
                 tokenize=False,
                 add_generation_prompt=False,
+                images=image_placeholders,
             )
-            for msg in batch_messages
-        ]
+            text_prompts.append(prompt)
 
         tokenized = self.tokenizer(
             text_prompts,
@@ -269,3 +272,14 @@ class Attacker:
         if out.dim() != 4:
             return None
         return out
+
+    def _count_images(self, messages: List[Dict[str, Any]]) -> int:
+        count = 0
+        for turn in messages:
+            content = turn.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    count += 1
+        return count

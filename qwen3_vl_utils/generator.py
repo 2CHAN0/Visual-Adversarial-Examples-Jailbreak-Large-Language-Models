@@ -25,10 +25,13 @@ class Generator:
         messages = copy.deepcopy(self.base_messages)
         if extra_user_prompt:
             messages[-1]["content"].append({"type": "text", "text": extra_user_prompt})
+        num_images = self._count_images(messages)
+        image_placeholders = [None] * num_images if num_images > 0 else None
         prompt = self.tokenizer.apply_chat_template(
             messages,
             tokenize=False,
             add_generation_prompt=True,
+            images=image_placeholders,
         )
         return prompt
 
@@ -75,3 +78,15 @@ class Generator:
             skip_special_tokens=True
         )[0]
         return outputs.strip()
+
+    @staticmethod
+    def _count_images(messages: List[Dict[str, Any]]) -> int:
+        count = 0
+        for turn in messages:
+            content = turn.get("content", [])
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "image":
+                    count += 1
+        return count
