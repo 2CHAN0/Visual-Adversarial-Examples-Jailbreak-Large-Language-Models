@@ -45,6 +45,7 @@ class Attacker:
         self.generator = generator.Generator(
             model=self.model,
             tokenizer=self.tokenizer,
+            processor=self.processor,
             base_messages=self.base_messages,
             device=self.device,
             pixel_mask=self.pixel_mask_base,
@@ -142,32 +143,12 @@ class Attacker:
         repeat_shape = [batch_size] + [1] * (images.dim() - 1)
         images = images.repeat(*repeat_shape)
 
-        pixel_mask = self._repeat_tensor(self.pixel_mask_base, batch_size)
-        if pixel_mask is None:
-            pixel_mask = self._default_pixel_mask(images, batch_size)
-
-        image_grid_thw = self._repeat_tensor(self.image_grid_thw_base, batch_size)
-        if image_grid_thw is None:
-            image_grid_thw = self._infer_grid_thw(images, batch_size)
-
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
-        prompt_strings = []
-        for msg in batch_messages:
-            num_images = self._count_images(msg)
-            image_placeholders = [None] * num_images if num_images > 0 else None
-            prompt = self.tokenizer.apply_chat_template(
-                msg,
-                tokenize=False,
-                add_generation_prompt=False,
-                images=image_placeholders,
-            )
-            prompt_strings.append(prompt)
+        pil_images = self._prepare_visual_batch(images)
 
         processor_inputs = self.processor(
-            text=prompt_strings,
-            pixel_values=images,
-            pixel_mask=pixel_mask,
-            image_grid_thw=image_grid_thw,
+            text=batch_messages,
+            images=pil_images,
             return_tensors="pt",
             padding=True,
         )
@@ -180,6 +161,18 @@ class Attacker:
         input_ids = processor_inputs["input_ids"]
         attention_mask = processor_inputs["attention_mask"]
         labels = input_ids.clone()
+
+        pixel_mask = processor_inputs.get("pixel_mask")
+        if pixel_mask is not None:
+            pixel_mask = pixel_mask.to(self.device)
+        else:
+            pixel_mask = self._default_pixel_mask(images, batch_size)
+
+        image_grid_thw = processor_inputs.get("image_grid_thw")
+        if image_grid_thw is not None:
+            image_grid_thw = image_grid_thw.to(self.device)
+        else:
+            image_grid_thw = self._infer_grid_thw(images, batch_size)
 
         target_tokenized = self.tokenizer(
             targets,
@@ -281,6 +274,16 @@ class Attacker:
         if out.dim() != 4:
             return None
         return out
+
+    def _prepare_visual_batch(self, tensor: torch.Tensor):
+        out = tensor.detach().float().cpu()
+        if out.dim() >= 5:
+            out = out[:, 0]
+        if out.dim() == 3:
+            out = out.unsqueeze(0)
+        if out.dim() != 4:
+            raise ValueError(f"Unsupported tensor shape for visual batch: {tensor.shape}")
+        return self.processor.image_processor.postprocess(out, output_type="pil")
 
     def _count_images(self, messages: List[Dict[str, Any]]) -> int:
         count = 0
