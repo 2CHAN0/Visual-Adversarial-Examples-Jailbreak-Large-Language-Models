@@ -8,7 +8,7 @@ from tqdm import tqdm
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from qwen2_5_vl_utils import prompt_wrapper, generator
+from qwen2_5_vl_utils import prompt_wrapper, generator, pixel_processor
 
 
 def find_subsequence(sequence: List[int], target: List[int]) -> Optional[int]:
@@ -23,7 +23,6 @@ def find_subsequence(sequence: List[int], target: List[int]) -> Optional[int]:
 class Attacker:
 
     def __init__(self, args, model, tokenizer, processor, base_messages, targets,
-                 image_meta: Optional[Dict[str, Any]] = None,
                  device: str = "cuda:0"):
         self.args = args
         self.model = model
@@ -32,16 +31,15 @@ class Attacker:
         self.base_messages = base_messages
         self.targets = targets
         self.device = device
+        self.torch_device = torch.device(device)
 
-        image_meta = image_meta or {}
-        self.pixel_mask_base = self._prepare_meta_tensor(image_meta.get("pixel_mask"))
-        self.image_grid_thw_base = self._prepare_meta_tensor(image_meta.get("image_grid_thw"))
+        self.pixel_value_builder = pixel_processor.PixelValueBuilder(
+            image_processor=self.processor.image_processor,
+            device=self.torch_device,
+        )
 
         vision_cfg = getattr(self.model.config, "vision_config", None)
         self.patch_size = getattr(vision_cfg, "patch_size", 14) if vision_cfg is not None else 14
-
-        self.pixel_mask_base = self._move_to_device(self.pixel_mask_base)
-        self.image_grid_thw_base = self._move_to_device(self.image_grid_thw_base)
 
         self.generator = generator.Generator(
             model=self.model,
@@ -49,8 +47,7 @@ class Attacker:
             processor=self.processor,
             base_messages=self.base_messages,
             device=self.device,
-            pixel_mask=self.pixel_mask_base,
-            image_grid_thw=self.image_grid_thw_base,
+            pixel_value_builder=self.pixel_value_builder,
         )
 
         self.loss_buffer: List[float] = []
@@ -58,15 +55,16 @@ class Attacker:
         self.model.eval()
         self.model.requires_grad_(False)
 
-    def attack_unconstrained(self, img, raw_image, batch_size=8, num_iter=2000, alpha=1 / 255.0):
+    def attack_unconstrained(self, img, batch_size=8, num_iter=2000, alpha=1 / 255.0):
+        img = img.to(self.torch_device)
         data_min, data_max = self._compute_bounds(img)
-        adv_data = torch.empty_like(img).uniform_(data_min, data_max).to(self.device)
+        adv_data = torch.empty_like(img).uniform_(data_min, data_max)
         adv_data.requires_grad_(True)
 
         for t in tqdm(range(num_iter + 1)):
             batch_targets = self._sample_targets(batch_size)
 
-            loss = self.attack_loss(adv_data, raw_image, batch_targets)
+            loss = self.attack_loss(adv_data, batch_targets)
             loss.backward()
 
             adv_data.data = (adv_data.data - alpha * adv_data.grad.detach().sign()).clamp(data_min, data_max)
@@ -78,18 +76,19 @@ class Attacker:
 
         return adv_data.detach()
 
-    def attack_constrained(self, img, raw_image, batch_size=8, num_iter=2000, alpha=1 / 255.0, epsilon=128 / 255.0):
+    def attack_constrained(self, img, batch_size=8, num_iter=2000, alpha=1 / 255.0, epsilon=128 / 255.0):
+        img = img.to(self.torch_device)
         base_img = img.detach()
         data_min, data_max = self._compute_bounds(base_img)
 
         adv_data = base_img + torch.empty_like(base_img).uniform_(-epsilon, epsilon)
-        adv_data = adv_data.clamp(data_min, data_max).to(self.device)
+        adv_data = adv_data.clamp(data_min, data_max)
         adv_data.requires_grad_(True)
 
         for t in tqdm(range(num_iter + 1)):
             batch_targets = self._sample_targets(batch_size)
 
-            loss = self.attack_loss(adv_data, raw_image, batch_targets)
+            loss = self.attack_loss(adv_data, batch_targets)
             loss.backward()
 
             adv_data.data = adv_data.data - alpha * adv_data.grad.detach().sign()
@@ -136,16 +135,19 @@ class Attacker:
         plt.clf()
         torch.save(self.loss_buffer, f"{self.args.save_dir}/loss")
 
-    def attack_loss(self, images: torch.Tensor, raw_image, targets: List[str]) -> torch.Tensor:
+    def attack_loss(self, images: torch.Tensor, targets: List[str]) -> torch.Tensor:
         batch_size = len(targets)
         if batch_size == 0:
             raise ValueError("No targets provided for attack_loss.")
 
         repeat_shape = [batch_size] + [1] * (images.dim() - 1)
-        images = images.repeat(*repeat_shape)
+        pixel_batch = images.repeat(*repeat_shape)
+
+        pixel_values, image_grid_thw = self.pixel_value_builder.build_inputs(pixel_batch)
+        pixel_values = pixel_values.to(device=self.torch_device, dtype=self.model.dtype)
+        image_grid_thw = image_grid_thw.to(self.torch_device)
 
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
-        repeated_images = [raw_image for _ in range(batch_size)]
 
         text_prompts = []
         for msg in batch_messages:
@@ -159,9 +161,11 @@ class Attacker:
             )
             text_prompts.append(prompt)
 
+        pil_images = pixel_processor.pixel_tensor_to_pil(pixel_batch)
+
         processor_inputs = self.processor(
             text=text_prompts,
-            images=repeated_images,
+            images=pil_images,
             return_tensors="pt",
             padding=True,
         )
@@ -176,16 +180,13 @@ class Attacker:
         labels = input_ids.clone()
 
         pixel_mask = processor_inputs.get("pixel_mask")
-        if pixel_mask is not None:
-            pixel_mask = pixel_mask.to(self.device)
+        if pixel_mask is None:
+            pixel_mask = torch.ones(batch_size, 1, dtype=torch.long, device=self.torch_device)
         else:
-            pixel_mask = self._default_pixel_mask(images, batch_size)
+            pixel_mask = pixel_mask.to(self.torch_device)
 
-        image_grid_thw = processor_inputs.get("image_grid_thw")
-        if image_grid_thw is not None:
-            image_grid_thw = image_grid_thw.to(self.device)
-        else:
-            image_grid_thw = self._infer_grid_thw(images, batch_size)
+        processor_inputs["pixel_values"] = pixel_values
+        processor_inputs["image_grid_thw"] = image_grid_thw
 
         target_tokenized = self.tokenizer(
             targets,
@@ -211,7 +212,7 @@ class Attacker:
             input_ids=input_ids,
             attention_mask=attention_mask,
             return_dict=True,
-            pixel_values=images.half(),
+            pixel_values=pixel_values,
             pixel_mask=pixel_mask,
             image_grid_thw=image_grid_thw,
             labels=labels,
@@ -232,78 +233,25 @@ class Attacker:
         sample_size = min(batch_size, population)
         return random.sample(self.targets, sample_size)
 
-    def _prepare_meta_tensor(self, tensor):
-        if tensor is None:
-            return None
-        if isinstance(tensor, torch.Tensor):
-            return tensor
-        return torch.tensor(tensor)
-
-    def _move_to_device(self, tensor):
-        if tensor is None:
-            return None
-        return tensor.to(self.device)
-
-    def _repeat_tensor(self, tensor: Optional[torch.Tensor], repeat: int) -> Optional[torch.Tensor]:
-        if tensor is None:
-            return None
-        repeat_dims = [repeat] + [1] * (tensor.dim() - 1)
-        return tensor.repeat(*repeat_dims).to(self.device)
-
-    def _default_pixel_mask(self, images: torch.Tensor, batch_size: int) -> torch.Tensor:
-        if images.dim() >= 5:
-            num_views = images.shape[1]
-        else:
-            num_views = 1
-        return torch.ones(batch_size, num_views, dtype=torch.long, device=images.device)
-
-    def _infer_grid_thw(self, images: torch.Tensor, batch_size: int) -> torch.Tensor:
-        if images.dim() >= 5:
-            _, num_views, _, h, w = images.shape
-            grid = torch.zeros(batch_size, num_views, 3, dtype=torch.long, device=images.device)
-            grid[:, :, 0] = 1
-            grid[:, :, 1] = h // self.patch_size
-            grid[:, :, 2] = w // self.patch_size
-            return grid
-        elif images.dim() == 4:
-            _, _, h, w = images.shape
-            grid = torch.tensor([1, h // self.patch_size, w // self.patch_size],
-                                dtype=torch.long, device=images.device)
-            return grid.unsqueeze(0).repeat(batch_size, 1)
-        else:
-            raise ValueError(f"Cannot infer grid from tensor with shape {images.shape}")
-
     def _compute_bounds(self, tensor: torch.Tensor) -> Tuple[float, float]:
         return tensor.min().item(), tensor.max().item()
 
     def export_image(self, tensor: torch.Tensor, path: str):
-        prepared = self._prepare_visual_tensor(tensor)
-        if prepared is None:
+        try:
+            batch = self._ensure_image_batch(tensor)
+            images = pixel_processor.pixel_tensor_to_pil(batch)
+            images[0].save(path)
+        except Exception as exc:
             torch.save(tensor.detach().cpu(), path + ".pt")
-            print(f"[Warning] Unable to render image; raw tensor dumped to {path}.pt")
-            return
-        images = self.processor.image_processor.postprocess(prepared, output_type="pil")
-        images[0].save(path)
+            print(f"[Warning] Unable to render image ({exc}); raw tensor dumped to {path}.pt")
 
-    def _prepare_visual_tensor(self, tensor: torch.Tensor) -> Optional[torch.Tensor]:
-        out = tensor.detach().float().cpu()
-        if out.dim() >= 5:
-            out = out[:, 0]
-        if out.dim() == 3:
-            out = out.unsqueeze(0)
-        if out.dim() != 4:
-            return None
-        return out
-
-    def _prepare_visual_batch(self, tensor: torch.Tensor):
-        out = tensor.detach().float().cpu()
-        if out.dim() >= 5:
-            out = out[:, 0]
-        if out.dim() == 3:
-            out = out.unsqueeze(0)
-        if out.dim() != 4:
+    def _ensure_image_batch(self, tensor: torch.Tensor) -> torch.Tensor:
+        batch = tensor.detach()
+        if batch.dim() == 3:
+            batch = batch.unsqueeze(0)
+        if batch.dim() != 4:
             raise ValueError(f"Unsupported tensor shape for visual batch: {tensor.shape}")
-        return self.processor.image_processor.postprocess(out, output_type="pil")
+        return batch
 
     def _count_images(self, messages: List[Dict[str, Any]]) -> int:
         count = 0

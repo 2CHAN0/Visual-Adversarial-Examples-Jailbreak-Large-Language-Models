@@ -4,7 +4,7 @@ import os
 
 from PIL import Image
 import torch
-from qwen2_5_vl_utils import prompt_wrapper, visual_attacker
+from qwen2_5_vl_utils import prompt_wrapper, visual_attacker, pixel_processor
 from qwen2_5_vl_utils.model_loader import load_qwen_model
 
 
@@ -62,15 +62,8 @@ def main():
         os.makedirs(args.save_dir, exist_ok=True)
 
     template = load_image(args.template_image)
-    image_inputs = processor(text=[""], images=[template], return_tensors="pt")
-    pixel_values = image_inputs["pixel_values"].to(device=device, dtype=model.dtype)
-
-    pixel_mask = image_inputs.get("pixel_mask")
-    if pixel_mask is not None:
-        pixel_mask = pixel_mask.to(device)
-
-    grid_key = "image_grid_thw" if "image_grid_thw" in image_inputs else "grid_thw" if "grid_thw" in image_inputs else None
-    image_grid_thw = image_inputs[grid_key].to(device) if grid_key is not None else None
+    template_tensor = pixel_processor.pil_to_pixel_tensor(template, device=torch.device(device))
+    template_tensor = template_tensor.to(dtype=torch.float32)
 
     targets = read_targets(args.targets_file)
     attacker = visual_attacker.Attacker(
@@ -80,18 +73,13 @@ def main():
         processor=processor,
         base_messages=base_messages,
         targets=targets,
-        image_meta={
-            "pixel_mask": pixel_mask,
-            "image_grid_thw": image_grid_thw,
-        },
         device=device,
     )
 
     if not args.constrained:
         print("[Qwen2.5-VL][unconstrained attack]")
         adv = attacker.attack_unconstrained(
-            img=pixel_values,
-            raw_image=template,
+            img=template_tensor,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,
@@ -99,8 +87,7 @@ def main():
     else:
         print("[Qwen2.5-VL][constrained attack]")
         adv = attacker.attack_constrained(
-            img=pixel_values,
-            raw_image=template,
+            img=template_tensor,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,

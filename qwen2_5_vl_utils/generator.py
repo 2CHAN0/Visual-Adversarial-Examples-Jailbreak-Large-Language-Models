@@ -1,7 +1,9 @@
 import copy
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 import torch
+
+from qwen2_5_vl_utils import pixel_processor
 
 
 class Generator:
@@ -9,8 +11,7 @@ class Generator:
     def __init__(self, model, tokenizer, processor, base_messages: List[Dict[str, Any]],
                  device: str = "cuda:0", max_new_tokens: int = 512,
                  temperature: float = 0.2,
-                 pixel_mask: Optional[torch.Tensor] = None,
-                 image_grid_thw: Optional[torch.Tensor] = None):
+                 pixel_value_builder=None):
 
         self.model = model
         self.tokenizer = tokenizer
@@ -19,8 +20,10 @@ class Generator:
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
-        self.pixel_mask = pixel_mask
-        self.image_grid_thw = image_grid_thw
+        if pixel_value_builder is None:
+            raise ValueError("pixel_value_builder must be provided for Generator.")
+        self.pixel_value_builder = pixel_value_builder
+        self.model_dtype = next(self.model.parameters()).dtype
 
     def _build_messages(self, extra_user_prompt: str = "") -> List[Dict[str, Any]]:
         messages = copy.deepcopy(self.base_messages)
@@ -29,17 +32,15 @@ class Generator:
         return messages
 
     def generate(self, image: torch.Tensor, extra_user_prompt: str = "") -> str:
-        image_input = image.detach()
-        if image_input.dim() >= 5:
-            image_input = image_input[0:1]
-        elif image_input.dim() == 4:
-            image_input = image_input[:1]
-        else:
-            raise ValueError(f"Unsupported image tensor shape {image_input.shape} for generator.")
+        image_input = self._ensure_image_batch(image)
 
         messages = self._build_messages(extra_user_prompt)
         prompt_str = self._build_prompt_string(messages)
-        pil_images = self._prepare_visual_batch(image_input)
+        pil_images = pixel_processor.pixel_tensor_to_pil(image_input)
+
+        pixel_values, image_grid_thw = self.pixel_value_builder.build_inputs(image_input.to(self.device))
+        pixel_values = pixel_values.to(device=self.device, dtype=self.model_dtype)
+        image_grid_thw = image_grid_thw.to(self.device)
 
         processor_inputs = self.processor(
             images=pil_images,
@@ -52,11 +53,8 @@ class Generator:
             k: v.to(self.device) if isinstance(v, torch.Tensor) else v
             for k, v in processor_inputs.items()
         }
-        processor_inputs["pixel_values"] = image_input.half()
-        if self.pixel_mask is not None:
-            processor_inputs["pixel_mask"] = self.pixel_mask
-        if self.image_grid_thw is not None:
-            processor_inputs["image_grid_thw"] = self.image_grid_thw
+        processor_inputs["pixel_values"] = pixel_values
+        processor_inputs["image_grid_thw"] = image_grid_thw
 
         input_ids = processor_inputs["input_ids"]
         input_len = input_ids.shape[1]
@@ -76,15 +74,15 @@ class Generator:
         )[0]
         return outputs.strip()
 
-    def _prepare_visual_batch(self, tensor: torch.Tensor):
-        out = tensor.detach().float().cpu()
-        if out.dim() >= 5:
-            out = out[:, 0]
-        if out.dim() == 3:
-            out = out.unsqueeze(0)
-        if out.dim() != 4:
-            raise ValueError(f"Unsupported tensor shape for visual batch: {tensor.shape}")
-        return self.processor.image_processor.postprocess(out, output_type="pil")
+    def _ensure_image_batch(self, tensor: torch.Tensor) -> torch.Tensor:
+        image_input = tensor.detach()
+        if image_input.dim() >= 5:
+            image_input = image_input[0:1]
+        if image_input.dim() == 3:
+            image_input = image_input.unsqueeze(0)
+        if image_input.dim() != 4:
+            raise ValueError(f"Unsupported image tensor shape {image_input.shape} for generator.")
+        return image_input
 
     def _build_prompt_string(self, messages: List[Dict[str, Any]]) -> str:
         num_images = self._count_images(messages)
