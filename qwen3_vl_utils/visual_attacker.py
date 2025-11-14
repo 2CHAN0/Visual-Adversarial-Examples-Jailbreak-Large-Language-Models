@@ -216,11 +216,7 @@ class Attacker:
             image_grid_thw=image_grid_thw,
         )
 
-        language_output = getattr(outputs, "language_model_output", None)
-        if language_output is None:
-            language_output = outputs["language_model_output"]
-
-        logits = language_output.logits
+        logits = outputs["logits"] if isinstance(outputs, dict) and "logits" in outputs else outputs.logits
         vocab_size = logits.shape[-1]
         loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
         loss = loss_fct(logits.view(-1, vocab_size), labels.view(-1))
