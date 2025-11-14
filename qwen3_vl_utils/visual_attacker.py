@@ -151,7 +151,7 @@ class Attacker:
             image_grid_thw = self._infer_grid_thw(images, batch_size)
 
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
-        text_prompts = []
+        prompt_strings = []
         for msg in batch_messages:
             num_images = self._count_images(msg)
             image_placeholders = [None] * num_images if num_images > 0 else None
@@ -161,15 +161,24 @@ class Attacker:
                 add_generation_prompt=False,
                 images=image_placeholders,
             )
-            text_prompts.append(prompt)
+            prompt_strings.append(prompt)
 
-        tokenized = self.tokenizer(
-            text_prompts,
+        processor_inputs = self.processor(
+            text=prompt_strings,
+            pixel_values=images,
+            pixel_mask=pixel_mask,
+            image_grid_thw=image_grid_thw,
             return_tensors="pt",
             padding=True,
         )
-        input_ids = tokenized["input_ids"].to(self.device)
-        attention_mask = tokenized["attention_mask"].to(self.device)
+
+        processor_inputs = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in processor_inputs.items()
+        }
+
+        input_ids = processor_inputs["input_ids"]
+        attention_mask = processor_inputs["attention_mask"]
         labels = input_ids.clone()
 
         target_tokenized = self.tokenizer(
