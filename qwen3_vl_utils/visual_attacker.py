@@ -3,6 +3,7 @@ import random
 from typing import List, Tuple, Optional, Dict, Any
 
 import torch
+import torch.nn as nn
 from tqdm import tqdm
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -209,13 +210,17 @@ class Attacker:
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
-            labels=labels,
             return_dict=True,
             pixel_values=images.half(),
             pixel_mask=pixel_mask,
             image_grid_thw=image_grid_thw,
         )
-        return outputs.loss
+
+        logits = outputs.logits
+        vocab_size = logits.shape[-1]
+        loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
+        loss = loss_fct(logits.view(-1, vocab_size), labels.view(-1))
+        return loss
 
     def _sample_targets(self, batch_size: int) -> List[str]:
         population = len(self.targets)
