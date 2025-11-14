@@ -12,7 +12,7 @@ except ImportError as exc:
 
 def load_qwen_model(model_name: str, gpu_id: int = 0):
     """
-    Loads a Qwen3-VL model, tokenizer, and processor from Hugging Face.
+    Loads a Qwen2.5-VL model, tokenizer, and processor from Hugging Face.
 
     Args:
         model_name: Hugging Face repo id or local path.
