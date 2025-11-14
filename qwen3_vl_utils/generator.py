@@ -7,13 +7,16 @@ import torch
 class Generator:
 
     def __init__(self, model, tokenizer, base_messages: List[Dict[str, Any]], device: str = "cuda:0",
-                 max_new_tokens: int = 512, temperature: float = 0.2):
+                 max_new_tokens: int = 512, temperature: float = 0.2,
+                 pixel_mask: torch.Tensor = None, image_grid_thw: torch.Tensor = None):
         self.model = model
         self.tokenizer = tokenizer
         self.base_messages = base_messages
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
+        self.pixel_mask = pixel_mask
+        self.image_grid_thw = image_grid_thw
 
     def _build_input_ids(self, extra_user_prompt: str = "") -> torch.Tensor:
         messages = copy.deepcopy(self.base_messages)
@@ -36,6 +39,8 @@ class Generator:
             output_ids = self.model.generate(
                 input_ids=input_ids,
                 pixel_values=image.half(),
+                pixel_mask=self.pixel_mask,
+                image_grid_thw=self.image_grid_thw,
                 do_sample=True,
                 temperature=self.temperature,
                 max_new_tokens=self.max_new_tokens,

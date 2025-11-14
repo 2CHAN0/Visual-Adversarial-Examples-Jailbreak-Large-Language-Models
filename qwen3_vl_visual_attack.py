@@ -64,8 +64,18 @@ def main():
         os.makedirs(args.save_dir, exist_ok=True)
 
     template = load_image(args.template_image)
-    image_tensor = processor.image_processor(template, return_tensors="pt")["pixel_values"].to(device=device,
-                                                                                                 dtype=model.dtype)
+    image_inputs = processor(text=[""], images=[template], return_tensors="pt")
+    pixel_values = image_inputs["pixel_values"].to(device=device, dtype=model.dtype)
+
+    pixel_mask = image_inputs.get("pixel_mask")
+    if pixel_mask is not None:
+        pixel_mask = pixel_mask.to(device)
+
+    grid_key = "image_grid_thw" if "image_grid_thw" in image_inputs else "grid_thw" if "grid_thw" in image_inputs else None
+    image_grid_thw = image_inputs[grid_key].to(device) if grid_key is not None else None
+
+    image_mean = torch.tensor(processor.image_processor.image_mean, dtype=pixel_values.dtype, device=device)
+    image_std = torch.tensor(processor.image_processor.image_std, dtype=pixel_values.dtype, device=device)
 
     targets = read_targets(args.targets_file)
     attacker = visual_attacker.Attacker(
@@ -75,13 +85,21 @@ def main():
         processor=processor,
         base_messages=base_messages,
         targets=targets,
+        image_meta={
+            "pixel_mask": pixel_mask,
+            "image_grid_thw": image_grid_thw,
+        },
+        image_norms={
+            "mean": image_mean,
+            "std": image_std,
+        },
         device=device,
     )
 
     if not args.constrained:
         print("[Qwen3-VL][unconstrained attack]")
         adv = attacker.attack_unconstrained(
-            img=image_tensor,
+            img=pixel_values,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,
@@ -89,7 +107,7 @@ def main():
     else:
         print("[Qwen3-VL][constrained attack]")
         adv = attacker.attack_constrained(
-            img=image_tensor,
+            img=pixel_values,
             batch_size=args.batch_size,
             num_iter=args.n_iters,
             alpha=args.alpha / 255.0,
