@@ -30,6 +30,18 @@ def load_image(path):
     return Image.open(path).convert("RGB")
 
 
+def count_images(messages):
+    count = 0
+    for turn in messages:
+        content = turn.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "image":
+                count += 1
+    return count
+
+
 def main():
     args = parse_args()
 
@@ -37,10 +49,18 @@ def main():
     base_messages = prompt_wrapper.build_base_messages(args.system_prompt, args.user_prompt)
 
     image = load_image(args.image_file)
-    prompts = [prompt_wrapper.append_assistant_response(base_messages, "")]
+    messages = prompt_wrapper.append_assistant_response(base_messages, "")
+    num_images = count_images(messages)
+    image_placeholders = [None] * num_images if num_images > 0 else None
+    prompt_text = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        images=image_placeholders,
+    )
 
     inputs = processor(
-        text=prompts,
+        text=[prompt_text],
         images=[image],
         return_tensors="pt",
         padding=True,
