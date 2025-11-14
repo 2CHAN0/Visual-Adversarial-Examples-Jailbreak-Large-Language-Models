@@ -1,53 +1,58 @@
 import copy
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 import torch
 
 
 class Generator:
 
-    def __init__(self, model, tokenizer, base_messages: List[Dict[str, Any]], device: str = "cuda:0",
-                 max_new_tokens: int = 512, temperature: float = 0.2,
-                 pixel_mask: torch.Tensor = None, image_grid_thw: torch.Tensor = None):
+    def __init__(self, model, processor, base_messages: List[Dict[str, Any]], device: str = "cuda:0",
+                 max_new_tokens: int = 512, temperature: float = 0.2):
         self.model = model
-        self.tokenizer = tokenizer
+        self.processor = processor
         self.base_messages = base_messages
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
-        self.pixel_mask = pixel_mask
-        self.image_grid_thw = image_grid_thw
 
-    def _build_input_ids(self, extra_user_prompt: str = "") -> torch.Tensor:
+    def _build_inputs(self, image: torch.Tensor, extra_user_prompt: str = ""):
         messages = copy.deepcopy(self.base_messages)
         if extra_user_prompt:
             messages[-1]["content"].append({"type": "text", "text": extra_user_prompt})
 
-        input_ids = self.tokenizer.apply_chat_template(
-            messages,
-            tokenize=True,
-            add_generation_prompt=True,
+        image = image.detach()
+        if image.dim() >= 5:
+            image = image[0]
+        if image.dim() == 3:
+            image_input = image
+        elif image.dim() == 4:
+            image_input = image.squeeze(0)
+        else:
+            raise ValueError(f"Unsupported image tensor shape {image.shape} for generator.")
+
+        batch = self.processor(
+            images=[image_input.cpu()],
+            text=messages,
             return_tensors="pt"
-        ).to(self.device)
-        return input_ids
+        )
+        batch = {k: v.to(self.device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
+        return batch
 
     def generate(self, image: torch.Tensor, extra_user_prompt: str = "") -> str:
-        input_ids = self._build_input_ids(extra_user_prompt)
+        inputs = self._build_inputs(image, extra_user_prompt)
+        input_ids = inputs["input_ids"]
         input_len = input_ids.shape[1]
 
         with torch.inference_mode():
             output_ids = self.model.generate(
-                input_ids=input_ids,
-                pixel_values=image.half(),
-                pixel_mask=self.pixel_mask,
-                image_grid_thw=self.image_grid_thw,
+                **inputs,
                 do_sample=True,
                 temperature=self.temperature,
                 max_new_tokens=self.max_new_tokens,
                 use_cache=True,
             )
 
-        outputs = self.tokenizer.batch_decode(
+        outputs = self.processor.tokenizer.batch_decode(
             output_ids[:, input_len:],
             skip_special_tokens=True
         )[0]

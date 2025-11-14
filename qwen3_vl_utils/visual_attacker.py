@@ -41,11 +41,9 @@ class Attacker:
 
         self.generator = generator.Generator(
             model=self.model,
-            tokenizer=self.tokenizer,
+            processor=self.processor,
             base_messages=self.base_messages,
             device=self.device,
-            pixel_mask=self.pixel_mask_base,
-            image_grid_thw=self.image_grid_thw_base,
         )
 
         self.loss_buffer: List[float] = []
@@ -147,9 +145,25 @@ class Attacker:
         if image_grid_thw is None:
             image_grid_thw = self._infer_grid_thw(images, batch_size)
 
-        input_ids_list = []
-        labels_list = []
-        attention_list = []
+        batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
+
+        processor_inputs = self.processor(
+            text=batch_messages,
+            pixel_values=images,
+            pixel_mask=pixel_mask,
+            image_grid_thw=image_grid_thw,
+            return_tensors="pt",
+            padding=True,
+        )
+
+        processor_inputs = {
+            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
+            for k, v in processor_inputs.items()
+        }
+
+        input_ids = processor_inputs["input_ids"]
+        attention_mask = processor_inputs["attention_mask"]
+        labels = input_ids.clone()
 
         target_tokenized = self.tokenizer(
             targets,
@@ -158,54 +172,34 @@ class Attacker:
             add_special_tokens=False,
         )
 
-        for idx, target in enumerate(targets):
-            convo = prompt_wrapper.append_assistant_response(self.base_messages, target)
-            encoded = self.tokenizer.apply_chat_template(
-                convo,
-                tokenize=True,
-                add_generation_prompt=False,
-            )
-
-            if isinstance(encoded, dict):
-                ids = encoded["input_ids"]
-                attention = encoded.get("attention_mask")
-            else:
-                ids = encoded
-                attention = None
-
-            ids_tensor = self._ensure_tensor(ids)
-            attention_tensor = self._ensure_tensor(attention) if attention is not None else torch.ones_like(ids_tensor)
-
-            labels = ids_tensor.clone()
-
+        for idx in range(batch_size):
             target_ids = target_tokenized["input_ids"][idx]
             if self.tokenizer.pad_token_id is not None:
-                target_list = target_ids[target_ids != self.tokenizer.pad_token_id].tolist()
+                target_tokens = target_ids[target_ids != self.tokenizer.pad_token_id].tolist()
             else:
-                target_list = target_ids.tolist()
-            start = find_subsequence(ids_tensor[0].tolist(), target_list)
+                target_tokens = target_ids.tolist()
+            start = find_subsequence(input_ids[idx].tolist(), target_tokens)
             if start is None:
-                start = max(ids_tensor.shape[1] - len(target_list), 0)
+                start = max(input_ids[idx].shape[0] - len(target_tokens), 0)
+            end = start + len(target_tokens)
+            labels[idx, :start] = -100
+            labels[idx, end:] = -100
 
-            labels[:, :start] = -100
-            end = start + len(target_list)
-            if end < labels.shape[1]:
-                labels[:, end:] = -100
-
-            input_ids_list.append(ids_tensor)
-            labels_list.append(labels)
-            attention_list.append(attention_tensor)
-
-        input_ids, attention_mask, labels = self._pad_inputs(input_ids_list, attention_list, labels_list)
+        pixel_values = processor_inputs["pixel_values"]
+        model_kwargs = {
+            "pixel_values": pixel_values.half(),
+        }
+        if "pixel_mask" in processor_inputs:
+            model_kwargs["pixel_mask"] = processor_inputs["pixel_mask"]
+        if "image_grid_thw" in processor_inputs:
+            model_kwargs["image_grid_thw"] = processor_inputs["image_grid_thw"]
 
         outputs = self.model(
-            input_ids=input_ids.to(self.device),
-            attention_mask=attention_mask.to(self.device),
-            labels=labels.to(self.device),
-            pixel_values=images.half(),
-            pixel_mask=pixel_mask,
-            image_grid_thw=image_grid_thw,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
             return_dict=True,
+            **model_kwargs,
         )
         return outputs.loss
 
@@ -217,52 +211,18 @@ class Attacker:
         return random.sample(self.targets, sample_size)
 
     @staticmethod
-    def _ensure_tensor(value) -> torch.Tensor:
-        if isinstance(value, torch.Tensor):
-            return value
-        if isinstance(value, list):
-            return torch.tensor(value).unsqueeze(0)
-        raise ValueError("Unsupported value type for tensor conversion.")
-
-    def _pad_inputs(
-            self,
-            input_ids_list: List[torch.Tensor],
-            attention_list: List[torch.Tensor],
-            labels_list: List[torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        max_len = max(t.shape[1] for t in input_ids_list)
-        pad_token_id = self.tokenizer.pad_token_id
-        if pad_token_id is None:
-            pad_token_id = self.tokenizer.eos_token_id or 0
-
-        batch = len(input_ids_list)
-        input_ids = torch.full((batch, max_len), pad_token_id, dtype=torch.long)
-        attention_mask = torch.zeros((batch, max_len), dtype=torch.long)
-        labels = torch.full((batch, max_len), -100, dtype=torch.long)
-
-        for i in range(batch):
-            length = input_ids_list[i].shape[1]
-            input_ids[i, :length] = input_ids_list[i][0]
-            attention_mask[i, :length] = attention_list[i][0]
-            labels[i, :length] = labels_list[i][0]
-
-        return input_ids, attention_mask, labels
-
-    def _compute_bounds(self, tensor: torch.Tensor) -> Tuple[float, float]:
-        return tensor.min().item(), tensor.max().item()
-
-    def _prepare_meta_tensor(self, tensor):
+    def _prepare_meta_tensor(tensor):
         if tensor is None:
             return None
         if isinstance(tensor, torch.Tensor):
-            return tensor.to(self.device)
-        return torch.tensor(tensor, device=self.device)
+            return tensor
+        return torch.tensor(tensor)
 
     def _repeat_tensor(self, tensor: Optional[torch.Tensor], repeat: int) -> Optional[torch.Tensor]:
         if tensor is None:
             return None
         repeat_dims = [repeat] + [1] * (tensor.dim() - 1)
-        return tensor.repeat(*repeat_dims)
+        return tensor.repeat(*repeat_dims).to(self.device)
 
     def _default_pixel_mask(self, images: torch.Tensor, batch_size: int) -> torch.Tensor:
         if images.dim() >= 5:
@@ -287,15 +247,8 @@ class Attacker:
         else:
             raise ValueError(f"Cannot infer grid from tensor with shape {images.shape}")
 
-    def _prepare_visual_tensor(self, tensor: torch.Tensor) -> Optional[torch.Tensor]:
-        out = tensor.detach().float().cpu()
-        if out.dim() >= 5:
-            out = out[:, 0]
-        if out.dim() == 3:
-            out = out.unsqueeze(0)
-        if out.dim() != 4:
-            return None
-        return out
+    def _compute_bounds(self, tensor: torch.Tensor) -> Tuple[float, float]:
+        return tensor.min().item(), tensor.max().item()
 
     def export_image(self, tensor: torch.Tensor, path: str):
         prepared = self._prepare_visual_tensor(tensor)
@@ -305,3 +258,13 @@ class Attacker:
             return
         images = self.processor.image_processor.postprocess(prepared, output_type="pil")
         images[0].save(path)
+
+    def _prepare_visual_tensor(self, tensor: torch.Tensor) -> Optional[torch.Tensor]:
+        out = tensor.detach().float().cpu()
+        if out.dim() >= 5:
+            out = out[:, 0]
+        if out.dim() == 3:
+            out = out.unsqueeze(0)
+        if out.dim() != 4:
+            return None
+        return out
