@@ -214,46 +214,16 @@ class Attacker:
             pixel_values=images.half(),
             pixel_mask=pixel_mask,
             image_grid_thw=image_grid_thw,
+            labels=labels,
         )
 
-        logits = None
-        if isinstance(outputs, dict):
-            if "language_model_output" in outputs and outputs["language_model_output"] is not None:
-                lm_out = outputs["language_model_output"]
-                logits = getattr(lm_out, "logits", None)
-            if logits is None and "logits" in outputs:
-                logits = outputs["logits"]
-        else:
-            lm_out = getattr(outputs, "language_model_output", None)
-            if lm_out is not None:
-                logits = getattr(lm_out, "logits", None)
-            if logits is None:
-                logits = getattr(outputs, "logits", None)
+        if hasattr(outputs, "loss") and outputs.loss is not None:
+            return outputs.loss
 
-        if logits is None:
-            hidden_states = None
-            if isinstance(outputs, dict):
-                hidden_states = outputs.get("text_hidden_states", None)
-            else:
-                hidden_states = getattr(outputs, "text_hidden_states", None)
-
-            if hidden_states is None:
-                raise RuntimeError("Unable to locate logits or text hidden states in model outputs.")
-
-            lm_head = None
-            if hasattr(self.model, "lm_head"):
-                lm_head = self.model.lm_head
-            elif hasattr(self.model, "language_model") and hasattr(self.model.language_model, "lm_head"):
-                lm_head = self.model.language_model.lm_head
-
-            if lm_head is None:
-                raise RuntimeError("Unable to locate lm_head for computing logits.")
-
-            logits = lm_head(hidden_states)
+        logits = outputs.logits if hasattr(outputs, "logits") else outputs["logits"]
         vocab_size = logits.shape[-1]
         loss_fct = nn.CrossEntropyLoss(ignore_index=-100)
-        loss = loss_fct(logits.view(-1, vocab_size), labels.view(-1))
-        return loss
+        return loss_fct(logits.view(-1, vocab_size), labels.view(-1))
 
     def _sample_targets(self, batch_size: int) -> List[str]:
         population = len(self.targets)

@@ -10,9 +10,9 @@ from qwen3_vl_utils.model_loader import load_qwen_model
 
 def parse_args():
 
-    parser = argparse.ArgumentParser(description="Visual attack script for Qwen3-VL models.")
-    parser.add_argument("--model-name", type=str, default="Qwen/Qwen3-VL-2B-Instruct",
-                        help="Hugging Face identifier of the Qwen3-VL checkpoint.")
+    parser = argparse.ArgumentParser(description="Visual attack script for Qwen2.5-VL models.")
+    parser.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-VL-3B-Instruct",
+                        help="Hugging Face identifier of the Qwen2.5-VL checkpoint.")
     parser.add_argument("--gpu-id", type=int, default=0, help="GPU id used for model loading.")
     parser.add_argument("--n-iters", type=int, default=5000, help="Number of optimization steps.")
     parser.add_argument("--batch-size", type=int, default=8, help="Number of target strings per step.")
@@ -52,7 +52,7 @@ def read_targets(csv_path):
 
 def main():
 
-    print(">>> Initializing Qwen3-VL pipeline")
+    print(">>> Initializing Qwen2.5-VL pipeline")
     args = parse_args()
 
     tokenizer, processor, model, device = load_qwen_model(args.model_name, args.gpu_id)
@@ -88,7 +88,7 @@ def main():
     )
 
     if not args.constrained:
-        print("[Qwen3-VL][unconstrained attack]")
+        print("[Qwen2.5-VL][unconstrained attack]")
         adv = attacker.attack_unconstrained(
             img=pixel_values,
             raw_image=template,
@@ -97,7 +97,7 @@ def main():
             alpha=args.alpha / 255.0,
         )
     else:
-        print("[Qwen3-VL][constrained attack]")
+        print("[Qwen2.5-VL][constrained attack]")
         adv = attacker.attack_constrained(
             img=pixel_values,
             raw_image=template,

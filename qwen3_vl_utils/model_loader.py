@@ -1,5 +1,13 @@
 import torch
-from transformers import AutoModel, AutoProcessor, AutoTokenizer
+from transformers import AutoProcessor, AutoTokenizer
+
+try:
+    from transformers import Qwen2_5_VLForConditionalGeneration
+except ImportError as exc:
+    raise ImportError(
+        "Qwen2.5-VL model class not available. Please upgrade `transformers` to a version that includes "
+        "`Qwen2_5_VLForConditionalGeneration`."
+    ) from exc
 
 
 def load_qwen_model(model_name: str, gpu_id: int = 0):
@@ -26,7 +34,7 @@ def load_qwen_model(model_name: str, gpu_id: int = 0):
         padding_side="right",
     )
     processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-    model = AutoModel.from_pretrained(
+    model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
         model_name,
         torch_dtype=dtype,
         trust_remote_code=True,
