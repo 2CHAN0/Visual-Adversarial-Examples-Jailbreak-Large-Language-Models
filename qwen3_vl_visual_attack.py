@@ -4,8 +4,6 @@ import os
 
 from PIL import Image
 import torch
-from torchvision.utils import save_image
-
 from qwen3_vl_utils import prompt_wrapper, visual_attacker
 from qwen3_vl_utils.model_loader import load_qwen_model
 
@@ -74,9 +72,6 @@ def main():
     grid_key = "image_grid_thw" if "image_grid_thw" in image_inputs else "grid_thw" if "grid_thw" in image_inputs else None
     image_grid_thw = image_inputs[grid_key].to(device) if grid_key is not None else None
 
-    image_mean = torch.tensor(processor.image_processor.image_mean, dtype=pixel_values.dtype, device=device)
-    image_std = torch.tensor(processor.image_processor.image_std, dtype=pixel_values.dtype, device=device)
-
     targets = read_targets(args.targets_file)
     attacker = visual_attacker.Attacker(
         args=args,
@@ -88,10 +83,6 @@ def main():
         image_meta={
             "pixel_mask": pixel_mask,
             "image_grid_thw": image_grid_thw,
-        },
-        image_norms={
-            "mean": image_mean,
-            "std": image_std,
         },
         device=device,
     )
@@ -115,7 +106,7 @@ def main():
         )
 
     save_path = os.path.join(args.save_dir, "bad_prompt.bmp")
-    save_image(adv, save_path)
+    attacker.export_image(adv, save_path)
     print(f"[Done] Saved adversarial image to {save_path}")
 
 
