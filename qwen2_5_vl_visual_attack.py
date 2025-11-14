@@ -4,8 +4,8 @@ import os
 
 from PIL import Image
 import torch
-from qwen2.5_vl_utils import prompt_wrapper, visual_attacker
-from qwen2.5_vl_utils.model_loader import load_qwen_model
+from qwen2_5_vl_utils import prompt_wrapper, visual_attacker
+from qwen2_5_vl_utils.model_loader import load_qwen_model
 
 
 def parse_args():
