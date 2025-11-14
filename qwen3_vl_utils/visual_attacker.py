@@ -39,11 +39,16 @@ class Attacker:
         vision_cfg = getattr(self.model.config, "vision_config", None)
         self.patch_size = getattr(vision_cfg, "patch_size", 14) if vision_cfg is not None else 14
 
+        self.pixel_mask_base = self._move_to_device(self.pixel_mask_base)
+        self.image_grid_thw_base = self._move_to_device(self.image_grid_thw_base)
+
         self.generator = generator.Generator(
             model=self.model,
-            processor=self.processor,
+            tokenizer=self.tokenizer,
             base_messages=self.base_messages,
             device=self.device,
+            pixel_mask=self.pixel_mask_base,
+            image_grid_thw=self.image_grid_thw_base,
         )
 
         self.loss_buffer: List[float] = []
@@ -146,23 +151,22 @@ class Attacker:
             image_grid_thw = self._infer_grid_thw(images, batch_size)
 
         batch_messages = [prompt_wrapper.append_assistant_response(self.base_messages, tgt) for tgt in targets]
+        text_prompts = [
+            self.tokenizer.apply_chat_template(
+                msg,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+            for msg in batch_messages
+        ]
 
-        processor_inputs = self.processor(
-            text=batch_messages,
-            pixel_values=images,
-            pixel_mask=pixel_mask,
-            image_grid_thw=image_grid_thw,
+        tokenized = self.tokenizer(
+            text_prompts,
             return_tensors="pt",
             padding=True,
         )
-
-        processor_inputs = {
-            k: v.to(self.device) if isinstance(v, torch.Tensor) else v
-            for k, v in processor_inputs.items()
-        }
-
-        input_ids = processor_inputs["input_ids"]
-        attention_mask = processor_inputs["attention_mask"]
+        input_ids = tokenized["input_ids"].to(self.device)
+        attention_mask = tokenized["attention_mask"].to(self.device)
         labels = input_ids.clone()
 
         target_tokenized = self.tokenizer(
@@ -185,21 +189,14 @@ class Attacker:
             labels[idx, :start] = -100
             labels[idx, end:] = -100
 
-        pixel_values = processor_inputs["pixel_values"]
-        model_kwargs = {
-            "pixel_values": pixel_values.half(),
-        }
-        if "pixel_mask" in processor_inputs:
-            model_kwargs["pixel_mask"] = processor_inputs["pixel_mask"]
-        if "image_grid_thw" in processor_inputs:
-            model_kwargs["image_grid_thw"] = processor_inputs["image_grid_thw"]
-
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             return_dict=True,
-            **model_kwargs,
+            pixel_values=images.half(),
+            pixel_mask=pixel_mask,
+            image_grid_thw=image_grid_thw,
         )
         return outputs.loss
 
@@ -210,13 +207,17 @@ class Attacker:
         sample_size = min(batch_size, population)
         return random.sample(self.targets, sample_size)
 
-    @staticmethod
-    def _prepare_meta_tensor(tensor):
+    def _prepare_meta_tensor(self, tensor):
         if tensor is None:
             return None
         if isinstance(tensor, torch.Tensor):
             return tensor
         return torch.tensor(tensor)
+
+    def _move_to_device(self, tensor):
+        if tensor is None:
+            return None
+        return tensor.to(self.device)
 
     def _repeat_tensor(self, tensor: Optional[torch.Tensor], repeat: int) -> Optional[torch.Tensor]:
         if tensor is None:
