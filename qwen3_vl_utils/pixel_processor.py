@@ -75,8 +75,10 @@ class PixelValueBuilder:
         self.temporal_patch_size = getattr(image_processor, "temporal_patch_size", 2)
         merge_size = getattr(image_processor, "merge_size", None)
         self.merge_size = merge_size if merge_size is not None else getattr(image_processor, "spatial_merge_size", 2)
-        self.min_pixels = getattr(image_processor, "min_pixels", 56 * 56)
-        self.max_pixels = getattr(image_processor, "max_pixels", 14 * 14 * 4 * 1280)
+        min_pixels = getattr(image_processor, "min_pixels", None)
+        self.min_pixels = min_pixels if min_pixels is not None else 56 * 56
+        max_pixels = getattr(image_processor, "max_pixels", None)
+        self.max_pixels = max_pixels if max_pixels is not None else 14 * 14 * 4 * 1280
         image_mean = getattr(image_processor, "image_mean", [0.48145466, 0.4578275, 0.40821073])
         image_std = getattr(image_processor, "image_std", [0.26862954, 0.26130258, 0.27577711])
         self.image_mean = torch.tensor(image_mean, dtype=torch.float32, device=device).view(1, 3, 1, 1)
