@@ -8,7 +8,7 @@ from tqdm import tqdm
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from qwen2_5_vl_utils import prompt_wrapper, generator, pixel_processor
+from qwen3_vl_utils import prompt_wrapper, generator, pixel_processor
 
 
 def find_subsequence(sequence: List[int], target: List[int]) -> Optional[int]:

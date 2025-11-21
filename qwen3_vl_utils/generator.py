@@ -3,7 +3,7 @@ from typing import List, Dict, Any
 
 import torch
 
-from qwen2_5_vl_utils import pixel_processor
+from qwen3_vl_utils import pixel_processor
 
 
 class Generator:
